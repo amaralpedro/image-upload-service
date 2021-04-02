@@ -1,0 +1,120 @@
+plugins:
+   - serverless-dotenv-plugin
+   - serverless-plugin-typescript-express
+   - serverless-offline
+
+service: image-upload-service
+
+provider:
+  name: aws
+  runtime: nodejs10.x
+  stage: ${env:ENVIRONMENT}
+  region: ${env:AWS_REGION_CODE}
+  environment:
+    AWS_ACCOUNT_ID: ${env:AWS_ACCOUNT_ID}
+    AWS_REGION_CODE: ${env:AWS_REGION_CODE}
+    AWS_S3_DEFAULT_SIGNED_URL_EXPIRATION: ${env:AWS_S3_DEFAULT_SIGNED_URL_EXPIRATION}
+    AWS_S3_IMAGES_BUCKET: ${env:AWS_S3_IMAGES_BUCKET}
+    ENVIRONMENT: ${env:ENVIRONMENT}
+  iamRoleStatements:
+    - Effect: "Allow"
+      Action:
+        - "lambda:InvokeFunction"
+      Resource: "*"
+    - Effect: "Allow"
+      Action:
+        - "s3:PutObject"
+        - "s3:GetObject"
+        - "s3:ListBucket"
+        - "s3:DeleteObject"
+      Resource:
+        - "arn:aws:s3:::${env:AWS_S3_IMAGES_BUCKET}"
+        - "arn:aws:s3:::${env:AWS_S3_IMAGES_BUCKET}/*"
+  httpApi:
+    authorizers:
+      serviceAuthorizer:
+        identitySource: $request.header.Authorization
+        issuerUrl: 
+          Fn::Join:
+          - ''
+          - - 'https://cognito-idp.'
+            - '${self:provider.region}'
+            - '.amazonaws.com/'
+            - Ref: serviceUserPool
+        audience:
+          - Ref: serviceUserPoolClient
+layers:
+  service:
+    package:
+      artifact: service-layer.zip
+package:
+  exclude:
+    - node_modules/**
+    - test/**
+    - nodejs/**
+    - service-layer.zip
+functions:
+  getUploadUrl:
+    handler: src/index.handler
+    name: ${self:provider.stage}-get-upload-url
+    layers:
+      - {Ref: ServiceLambdaLayer}
+    events:
+      - httpApi:
+          method: POST
+          path: /api/v1/images/upload-url
+          authorizer: serviceAuthorizer
+  processImage:
+    handler: src/handlers/index.processImage
+    name: ${self:provider.stage}-process-image
+    layers:
+      - {Ref: ServiceLambdaLayer}
+      - arn:aws:lambda:${self:provider.region}:${env:AWS_ACCOUNT_ID}:layer:image-magick:1
+    events:
+      - s3:
+          bucket: ${env:AWS_S3_IMAGES_BUCKET}
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: image
+          existing: true
+resources:
+  Resources:
+    HttpApi:
+      DependsOn: serviceUserPool
+    serviceUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        UserPoolName: service-user-pool-${self:provider.stage}
+        UsernameAttributes:
+          - email
+        AutoVerifiedAttributes:
+          - email
+    serviceUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: service-user-pool-client-${self:provider.stage}
+        AllowedOAuthFlows:
+          - implicit
+        AllowedOAuthFlowsUserPoolClient: true
+        AllowedOAuthScopes:
+          - phone
+          - email
+          - openid
+          - profile
+          - aws.cognito.signin.user.admin
+        UserPoolId:
+          Ref: serviceUserPool
+        CallbackURLs: 
+          - http://localhost:9000
+        ExplicitAuthFlows:
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        GenerateSecret: false
+        SupportedIdentityProviders: 
+          - COGNITO
+    serviceUserPoolDomain:
+      Type: AWS::Cognito::UserPoolDomain 
+      Properties:
+        UserPoolId: 
+          Ref: serviceUserPool
+        Domain: service-user-pool-domain-${self:provider.stage}-${env:DOMAIN_SUFFIX}
